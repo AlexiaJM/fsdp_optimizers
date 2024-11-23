@@ -6,6 +6,8 @@ from itertools import chain
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from utils import to_local, to_dist
 
+# adapted from https://github.com/ClashLuke/SOAP
+
 # Parts of the code are modifications of Pytorch's AdamW optimizer
 # Parts of the code are modifications of code from https://github.com/jiaweizzhao/GaLore/blob/master/galore_torch/galore_projector.py
 
