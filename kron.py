@@ -4,6 +4,8 @@ import torch
 from torch.distributed.tensor import distribute_tensor, DTensor, Replicate, Shard
 from utils import to_local, to_dist
 
+# adapted from https://github.com/ClashLuke/kron_torch/tree/main
+
 torch._dynamo.config.cache_size_limit = 1_000_000
 
 try:
