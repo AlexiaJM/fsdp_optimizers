@@ -262,11 +262,12 @@ class Kron(torch.optim.Optimizer):
                     moment_buffer_local.to(dtype=precond_dtype, non_blocking=True),
                 ).to(dtype=p.dtype, non_blocking=True)
 
+                # now we can distribute again
+                pre_grad = to_dist(pre_grad, device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
+                
                 # Apply trust region
                 pre_grad = (torch.tanh(pre_grad / group["trust_region_scale"]) * group["trust_region_scale"])
 
-                # now we can distribute again
-                pre_grad = to_dist(pre_grad, device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
                 for i in range(4):
                     if is_tensor(state[f"Q{i}"]):
                         state[f"Q{i}"] = to_dist(state[f"Q{i}"], device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
