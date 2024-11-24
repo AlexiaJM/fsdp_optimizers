@@ -18,7 +18,7 @@ from soap import SOAP
 from kron import Kron
 
 debug = False
-optimizer = "kron"
+optimizer = "soap"
 optimizers = {
     "kron": Kron,
     "soap": SOAP,
@@ -153,7 +153,7 @@ class VIT(nn.Module):
 
     def __init__(
         self,
-        num_layers=12,
+        num_layers=8,
         head_dim=64,
         heads=8,
         mlp_mult=4,
@@ -201,7 +201,7 @@ transform = transforms.Compose(
     [transforms.ToTensor(),
      transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-batch_size = 128
+batch_size = 512
 
 # hack if you're downloading for first time
 if torch.distributed.get_rank() == 0:
