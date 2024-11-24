@@ -138,7 +138,7 @@ class SOAP(optim.Optimizer):
                     # Exponential moving average of squared gradient values
                     state["exp_avg_sq"] = torch.zeros_like(grad)
                 
-                if 'Q' not in state:
+                if 'Q0' not in state:
                     self.init_preconditioner(
                         grad,
                         state,
@@ -218,32 +218,44 @@ class SOAP(optim.Optimizer):
         """
         Initializes the preconditioner matrices (L and R in the paper).
         """
-        state['GG'] = [] # Will hold all the preconditioner matrices (L and R in the paper).
+        # -2: None, -1: []
+        state['GG0'] = -2 # Will hold all the preconditioner matrices (L and R in the paper).
+        state['GG1'] = -2
+        state['GG2'] = -2
+        state['GG3'] = -2
         if grad.dim() == 1:
             if not precondition_1d or grad.shape[0] > max_precond_dim:
-                state['GG'].append([])
+                state['GG0'] = -1 
             else:
                 tensor = torch.zeros(grad.shape[0], grad.shape[0], device=grad.device)
                 if isinstance(grad, DTensor):
                     tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=grad.placements)
-                state['GG'].append(tensor)
+                state['GG0'] = tensor
         else:
             if merge_dims:
                 grad = self.merge_dims(grad, max_precond_dim)
 
-            for sh in grad.shape:
-                if sh > max_precond_dim:
-                    state['GG'].append([])
+            for i in range(4):
+                if i <= len(grad.shape) - 1:
+                    sh = grad.shape[i]
+                    if sh > max_precond_dim:
+                        state[f'GG{i}'] = -1 
+                        # state[f'GG{i}'] = None
+                    else:
+                        tensor = torch.zeros(sh, sh, device=grad.device)
+                        if isinstance(grad, DTensor):
+                            # special case here we can do this because all devices contain the same tensor of zeros
+                            # if its randn i think we need to broadcast
+                            # tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=[Replicate()] * grad.device_mesh.ndim)
+                            tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=grad.placements)
+                        state[f'GG{i}'] = tensor
                 else:
-                    tensor = torch.zeros(sh, sh, device=grad.device)
-                    if isinstance(grad, DTensor):
-                        # special case here we can do this because all devices contain the same tensor of zeros
-                        # if its randn i think we need to broadcast
-                        # tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=[Replicate()] * grad.device_mesh.ndim)
-                        tensor = distribute_tensor(tensor, device_mesh=grad.device_mesh, placements=grad.placements)
-                    state['GG'].append(tensor)
+                    pass
                     
-        state['Q'] = None # Will hold all the eigenbases of the preconditioner.
+        state['Q0'] = -2 # Will hold all the eigenbases of the preconditioner.
+        state['Q1'] = -2
+        state['Q2'] = -2
+        state['Q3'] = -2
         state['precondition_frequency'] = precondition_frequency
         state['shampoo_beta'] = shampoo_beta          
         
@@ -257,14 +269,14 @@ class SOAP(optim.Optimizer):
                 permuted_shape = grad.permute(0, 3, 1, 2).shape
             grad = self.merge_dims(grad, max_precond_dim)
 
-        for mat in state['Q']:
-            if len(mat) > 0:
+        for mat in (state['Q0'], state['Q1'], state['Q2'], state['Q3']):
+            if isinstance(mat, torch.Tensor):
                 grad = torch.tensordot(
                         grad,
                         mat,
                         dims=[[0], [0]],
                     )
-            else:
+            elif mat == -1:
                 permute_order = list(range(1, len(grad.shape))) + [0]
                 grad = grad.permute(permute_order)
         
@@ -282,7 +294,7 @@ class SOAP(optim.Optimizer):
         """
         if grad.dim() == 1:
             if precondition_1d and grad.shape[0] <= max_precond_dim:
-                state['GG'][0].lerp_(grad.unsqueeze(1) @ grad.unsqueeze(0), 1-state['shampoo_beta'])
+                state['GG0'].lerp_(grad.unsqueeze(1) @ grad.unsqueeze(0), 1-state['shampoo_beta'])
         else:
             if merge_dims:
                 new_grad = self.merge_dims(grad, max_precond_dim)
@@ -293,7 +305,7 @@ class SOAP(optim.Optimizer):
                                 new_grad,
                                 dims=[[*chain(range(idx), range(idx + 1, len(new_grad.shape)))]] * 2,
                             )
-                        state['GG'][idx].lerp_(outer_product, 1-state['shampoo_beta'])
+                        state[f'GG{idx}'].lerp_(outer_product, 1-state['shampoo_beta'])
             else:
                 for idx, sh in enumerate(grad.shape):
                     if sh <= max_precond_dim:
@@ -309,12 +321,12 @@ class SOAP(optim.Optimizer):
                                 # Contracts across all dimensions except for k.
                                 dims=[[*chain(range(idx), range(idx + 1, len(grad.shape)))]] * 2,
                             )
-                        state['GG'][idx].lerp_(outer_product, 1-state['shampoo_beta'])
+                        state[f'GG{idx}'].lerp_(outer_product, 1-state['shampoo_beta'])
                      
-        if state['Q'] is None:
-            state['Q'] = self.get_orthogonal_matrix(state['GG'])
+        if not isinstance(state['Q0'], torch.Tensor) and state['Q0'] == -2: # not yet initialized
+            state['Q0'], state['Q1'], state['Q2'], state['Q3'] = self.get_orthogonal_matrix([state['GG0'], state['GG1'], state['GG2'], state['GG3']])
         if state['step'] > 0 and state['step'] % state['precondition_frequency'] == 0:
-            state['Q'] = self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims)           
+            state['Q0'], state['Q1'], state['Q2'], state['Q3'] = self.get_orthogonal_matrix_QR(state, max_precond_dim, merge_dims)           
 
     def project_back(self, grad, state, merge_dims=False, max_precond_dim=10000):
         """
@@ -325,14 +337,14 @@ class SOAP(optim.Optimizer):
             if self._data_format == 'channels_last' and grad.dim() == 4:
                 permuted_shape = grad.permute(0, 3, 1, 2).shape
             grad = self.merge_dims(grad, max_precond_dim)
-        for mat in state['Q']:
-            if len(mat) > 0:
+        for mat in [state['Q0'], state['Q1'], state['Q2'], state['Q3']]:
+            if isinstance(mat, torch.Tensor):
                 grad = torch.tensordot(
                         grad,
                         mat,
                         dims=[[0], [1]],
                     )
-            else:
+            elif mat == -1:
                 permute_order = list(range(1, len(grad.shape))) + [0]
                 grad = grad.permute(permute_order)
                 
@@ -350,8 +362,9 @@ class SOAP(optim.Optimizer):
         """
         matrix = []
         for m in mat:
-            if len(m) == 0:
-                matrix.append([])
+            # -1 or -2
+            if not isinstance(m, torch.Tensor):
+                matrix.append(m)
                 continue
             if m.data.dtype != torch.float:
                 float_data = False
@@ -367,12 +380,12 @@ class SOAP(optim.Optimizer):
         final = []
         for m in matrix:
             is_dtensor = False
+            if not isinstance(m, torch.Tensor):
+                final.append(m)
+                continue
             if isinstance(m, DTensor):
                 is_dtensor = True
                 m, meta = to_local(m, keep_sharded=False)
-            if len(m) == 0:
-                final.append([])
-                continue
             try:
                 _, Q = torch.linalg.eigh(m+1e-30*torch.eye(m.shape[0], device=m.device))
             except:
@@ -393,15 +406,15 @@ class SOAP(optim.Optimizer):
         Computes the eigenbases of the preconditioner using one round of power iteration 
         followed by torch.linalg.qr decomposition.
         """
-        precond_list = state['GG']
-        orth_list = state['Q']
+        precond_list = [state['GG0'], state['GG1'], state['GG2'], state['GG3']]
+        orth_list = [state['Q0'], state['Q1'], state['Q2'], state['Q3']]
 
         matrix = []
         orth_matrix = []
         for m,o in zip(precond_list, orth_list):
-            if len(m) == 0:
-                matrix.append([])
-                orth_matrix.append([])
+            if not isinstance(m, torch.Tensor):
+                matrix.append(m)
+                orth_matrix.append(o)
                 continue
             if m.data.dtype != torch.float:
                 float_data = False
@@ -431,8 +444,8 @@ class SOAP(optim.Optimizer):
 
         final = []
         for ind, (m,o) in enumerate(zip(matrix, orth_matrix)):
-            if len(m)==0:
-                final.append([])
+            if not isinstance(m, torch.Tensor):
+                final.append(m)
                 continue
             # argsort does not work with Dtensor, neither does indexing
             is_dtensor = False
