@@ -14,6 +14,12 @@ except AttributeError:
     # opt_einsum backend is not available, so we'll skip setting the strategy
     pass
 
+def is_tensor(x):
+    return isinstance(x, torch.Tensor)
+
+def get_q(state):
+    return [q for q in (state["Q0"], state["Q1"], state["Q2"], state["Q3"]) if is_tensor(q)]
+
 
 def precond_update_prob_schedule(
     max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
@@ -75,13 +81,17 @@ class Kron(torch.optim.Optimizer):
         lr=0.001,
         b1=0.9,
         weight_decay=0.0,
-        preconditioner_update_probability=None,
+        preconditioner_update_probability_schedule=True,
         max_size_triangular=8192,
         min_ndim_triangular=2,
         memory_save_mode=None,
         mu_dtype=None,
         precond_dtype=None,
         trust_region_scale=2.0,
+        min_prob=0.03,
+        max_prob=1.0,
+        decay=0.001,
+        flat_start=250,
     ):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -106,12 +116,43 @@ class Kron(torch.optim.Optimizer):
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             trust_region_scale=trust_region_scale,
+            preconditioner_update_probability_schedule=preconditioner_update_probability_schedule,
+
+            # pickling for statedict is picky with what it will allow, only int, float, and tensor, no functions can be in state
+            max_prob= max_prob,
+            min_prob= min_prob,
+            decay= decay,
+            flat_start= flat_start,
         )
         super(Kron, self).__init__(params, defaults)
 
         self._tiny = torch.finfo(torch.bfloat16).tiny
         self._prob_step = 0
 
+    def precond_update_prob_schedule(self, n,
+        max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
+    ):
+        """Anneal preconditioner update probability during beginning of training.
+
+        PSGD benefits from more preconditioner updates at the beginning of training,
+        but once the preconditioner is learned the update probability can drop low.
+
+        This schedule is an exponential anneal with a flat start. Default settings keep
+        update probability at 1.0 for 200 steps then exponentially anneal down to
+        `min_prob` by 4000 steps. Default settings work very well for most models and
+        training regimes.
+        """
+
+        """Exponential anneal with flat start."""
+        n = torch.tensor(n, dtype=torch.float32)
+        prob = torch.minimum(
+            torch.maximum(
+                max_prob * torch.exp(-decay * (n - flat_start)), torch.tensor(min_prob)
+            ),
+            torch.tensor(max_prob),
+        )
+        return prob
+    
     @torch.no_grad()
     def step(self, closure=None):
         loss = None
@@ -125,9 +166,10 @@ class Kron(torch.optim.Optimizer):
         total_precond_mb = 0
 
         # update preconditioners all together
-        update_prob = self.param_groups[0]["preconditioner_update_probability"]
-        if callable(update_prob):
-            update_prob = update_prob(self._prob_step)
+        if self.param_groups[0]["preconditioner_update_probability_schedule"] is True:
+            update_prob = self.precond_update_prob_schedule(self._prob_step, self.param_groups[0]["max_prob"], self.param_groups[0]["min_prob"], self.param_groups[0]["decay"], self.param_groups[0]["flat_start"])
+        else:
+            raise ValueError("Only True is supported for preconditioner_update_probability_schedule")
         device = self.param_groups[0]["params"][0].device
         do_update = torch.rand([], device=device) < update_prob
         self._prob_step += 1
@@ -150,7 +192,7 @@ class Kron(torch.optim.Optimizer):
                     state["momentum_buffer"] = torch.zeros_like(
                         p, dtype=mu_dtype or p.dtype
                     )
-                    state["Q"], state["exprs"] = init_Q_exprs(
+                    q_state, exprs = init_Q_exprs(
                         p,
                         group["precond_init_scale"],
                         group["max_size_triangular"],
@@ -158,6 +200,12 @@ class Kron(torch.optim.Optimizer):
                         group["memory_save_mode"],
                         dtype=precond_dtype,
                     )
+                    state["Q0"] = q_state[0]
+                    state["Q1"] = q_state[1]
+                    state["Q2"] = q_state[2]
+                    state["Q3"] = q_state[3]
+            
+                    self.expr_cache[param._cdata] = exprs
 
                     # Print sizes
                     momentum_size = state["momentum_buffer"].numel()
@@ -169,9 +217,9 @@ class Kron(torch.optim.Optimizer):
                     total_momentum_size += momentum_size
                     total_momentum_mb += momentum_mb
 
-                    precond_size = sum(q.numel() for q in state["Q"])
+                    precond_size = sum(q.numel() for q in get_q(state))
                     precond_mb = sum(
-                        q.numel() * q.element_size() for q in state["Q"]
+                        q.numel() * q.element_size() for q in get_q(state)
                     ) / (2**20)
                     total_precond_size += precond_size
                     total_precond_mb += precond_mb
@@ -187,17 +235,20 @@ class Kron(torch.optim.Optimizer):
                 # we're likely better off just bringing everything local than just sharding back at the end
                 # cant do max either
                 moment_buffer_local, mom_meta = to_local(momentum_buffer, keep_sharded=False)
+                for i in range(4):
+                    if is_tensor(state[f"Q{i}"]):
+                        state[f"Q{i}"] = to_local(state[f"Q{i}"], keep_sharded=False)[0]
                 state["Q"] = [to_local(q, keep_sharded=False)[0] for q in state["Q"]]
 
                 # balance preconditioners about every 100 updates
                 if grad.dim() > 1 and balance:
-                    _balance_Q(state["Q"])
+                    _balance_Q(get_q(state))
 
                 # Update preconditioner
                 if do_update:
-                    state["Q"] = update_precond(
-                        state["Q"],
-                        state["exprs"],
+                    update_precond(
+                        get_q(state),
+                        self.expr_cache[p._cdata],
                         torch.randn_like(moment_buffer_local, dtype=precond_dtype),
                         moment_buffer_local.to(dtype=precond_dtype, non_blocking=True),
                         group["precond_lr"],
@@ -206,8 +257,8 @@ class Kron(torch.optim.Optimizer):
 
                 # Precondition gradients
                 pre_grad = _precond_grad(
-                    state["Q"],
-                    state["exprs"],
+                    get_q(state),
+                    self.expr_cache[p._cdata],
                     moment_buffer_local.to(dtype=precond_dtype, non_blocking=True),
                 ).to(dtype=p.dtype, non_blocking=True)
 
@@ -216,7 +267,9 @@ class Kron(torch.optim.Optimizer):
 
                 # now we can distribute again
                 pre_grad = to_dist(pre_grad, device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
-                state["Q"] = [to_dist(q, device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim) for q in state["Q"]]
+                for i in range(4):
+                    if is_tensor(state[f"Q{i}"]):
+                        state[f"Q{i}"] = to_dist(state[f"Q{i}"], device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
                 state["momentum_buffer"] = to_dist(moment_buffer_local, device_mesh=mom_meta['device_mesh'], placements=[Replicate()] * mom_meta['device_mesh'].ndim)
 
                 # Apply weight decay and update parameters
@@ -254,6 +307,8 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
             Q = [distribute_tensor(scale * torch.ones_like(t.full_tensor(), dtype=dtype), device_mesh=t.device_mesh, placements=t.placements)]
         else:
             Q = [scale * torch.ones_like(t, dtype=dtype)]
+        for i in range(3):
+            Q.append(-2)
         exprA = ",->,"
         exprGs = [",->"]
         exprP = ",,->,"
@@ -347,7 +402,9 @@ def init_Q_exprs(t, scale, max_size, min_ndim_triangular, memory_save_mode, dtyp
                 piece2P.append(a + c)
                 piece3P = piece3P + c
                 piece4P = piece4P + b
-
+                
+        while len(Q) < 4:
+            Q.append(-2)
         exprA = ",".join(piece1A) + "," + piece2A + "->" + piece3A
         exprP = (
             ",".join(piece1P) + "," + ",".join(piece2P) + "," + piece3P + "->" + piece4P
@@ -429,7 +486,6 @@ def update_precond(Q, exprs, V, G, step, tiny):
 
     terms = _q_terms(exprGs, A, conjB)
 
-    new_Q = []
     for q, (term1, term2) in zip(Q, terms):
         if q.dim() < 2:
             q.sub_(
@@ -445,7 +501,6 @@ def update_precond(Q, exprs, V, G, step, tiny):
                 * torch.triu(term1 - term2)
                 @ q
             )
-        new_Q.append(q)
     
     return new_Q
 
