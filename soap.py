@@ -188,7 +188,7 @@ class SOAP(optim.Optimizer):
                                                  max_precond_dim=group['max_precond_dim'])
 
                 if group["normalize_grads"]:
-                    norm_grad = norm_grad / (1e-30+torch.mean(norm_grad**2)**0.5)
+                    norm_grad = norm_grad / (1e-16+torch.mean(norm_grad**2)**0.5)
                 
                 p.add_(norm_grad, alpha=-step_size)
                 
@@ -286,6 +286,7 @@ class SOAP(optim.Optimizer):
             else:
                 grad = grad.reshape(original_shape)
         return grad
+    
         
     def update_preconditioner(self, grad, state, 
                               max_precond_dim=10000, merge_dims=False, precondition_1d=False):
