@@ -15,6 +15,8 @@ from utils import to_dist, to_local
 #     # opt_einsum backend is not available, so we'll skip setting the strategy
 #     pass
 
+# adapted from https://github.com/evanatyourservice/kron_torch/blob/mars/kron_torch/kron.py
+
 def is_tensor(x):
     return isinstance(x, torch.Tensor)
 
