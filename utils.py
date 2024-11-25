@@ -31,19 +31,19 @@ def local_op(fn, *args, keep_sharded=False, **kwargs):
     return result
 
 def to_local(x, keep_sharded=False):
-    meta = dict(
-        device_mesh=x.device_mesh,
-        placements=x.placements,
-        shape=x.shape,
-        stride=x.stride(),
-    )
     if isinstance(x, DTensor):
+        meta = dict(
+            device_mesh=x.device_mesh,
+            placements=x.placements,
+            shape=x.shape,
+            stride=x.stride(),
+        )
         if keep_sharded:
             return x.to_local(), meta
         else:
             return x.full_tensor(), meta
 
-    return x, meta
+    return x, None
 
 def to_dist(x, **meta):
     # return DTensor.from_local(x, **meta)

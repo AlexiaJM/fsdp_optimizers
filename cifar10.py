@@ -17,13 +17,15 @@ from tqdm import tqdm
 from soap import SOAP
 from kron import Kron
 from muon import Muon
+from kron_mars import KronMars
 
 debug = False
-optimizer = "kron"
+optimizer = "kron_mars"
 optimizers = {
     "kron": Kron,
     "soap": SOAP,
     "muon": Muon,
+    "kron_mars": KronMars,
 }
 optimizer_class = optimizers[optimizer]
 
