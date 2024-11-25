@@ -148,17 +148,6 @@ class Muon(torch.optim.Optimizer):
                         g = to_dist(g, **meta)
                     g *= max(1, g.size(0)/g.size(1))**0.5
 
-                    # do reduction, it should be already reduced?
-                    # if self.world_size > 1:
-                    #     if isinstance(g, DTensor):
-                    #         torch.distributed.breakpoint()
-                    #         g.device_mesh["dp"].get_group().allreduce(g, op=dist.ReduceOp.SUM)
-                    #         g /= self.world_size
-                    #     else:
-                    #         # original does sum not mean
-                    #         dist.all_reduce(g, op=dist.ReduceOp.SUM)
-                    #         # g /= self.world_size
-
                     g = g.view_as(p.data).type_as(p.data)
                     p.data.add_(g, alpha=-lr)
                 else:
