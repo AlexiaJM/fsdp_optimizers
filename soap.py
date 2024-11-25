@@ -396,7 +396,7 @@ class SOAP(optim.Optimizer):
             if not float_data:
                 Q = Q.to(original_device).type(original_type)
             if is_dtensor:
-                Q = distribute_tensor(Q, device_mesh=meta['device_mesh'], placements=meta['placements'])
+                Q = to_dist(Q, **meta)
             final.append(Q)
         return final
         
@@ -463,7 +463,7 @@ class SOAP(optim.Optimizer):
             if not float_data:
                 Q = Q.to(original_device).type(original_type)
             if is_dtensor:
-                Q = distribute_tensor(Q, device_mesh=meta['device_mesh'], placements=meta['placements'])
+                Q = to_dist(Q, **meta)
             final.append(Q)
         
         if merge_dims:
@@ -473,7 +473,7 @@ class SOAP(optim.Optimizer):
                 exp_avg_sq = exp_avg_sq.reshape(orig_shape)
 
         if eas_is_dtensor:
-            exp_avg_sq = distribute_tensor(exp_avg_sq, device_mesh=eas_meta['device_mesh'], placements=eas_meta['placements'])
+            exp_avg_sq = to_dist(exp_avg_sq, **eas_meta)
                 
         state['exp_avg_sq'] = exp_avg_sq
         return final

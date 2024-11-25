@@ -19,7 +19,7 @@ from kron import Kron
 from muon import Muon
 
 debug = False
-optimizer = "muon"
+optimizer = "kron"
 optimizers = {
     "kron": Kron,
     "soap": SOAP,

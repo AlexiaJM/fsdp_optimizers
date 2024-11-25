@@ -92,6 +92,8 @@ class Kron(torch.optim.Optimizer):
         max_prob=1.0,
         decay=0.001,
         flat_start=250,
+        precond_lr=0.1,
+        precond_init_scale=1.0,
     ):
         if not 0.0 <= lr:
             raise ValueError(f"Invalid learning rate: {lr}")
@@ -100,19 +102,15 @@ class Kron(torch.optim.Optimizer):
         if not 0.0 <= weight_decay:
             raise ValueError(f"Invalid weight_decay value: {weight_decay}")
 
-        if preconditioner_update_probability is None:
-            preconditioner_update_probability = precond_update_prob_schedule()
-
         defaults = dict(
             lr=lr,
             b1=b1,
             weight_decay=weight_decay,
-            preconditioner_update_probability=preconditioner_update_probability,
             max_size_triangular=max_size_triangular,
             min_ndim_triangular=min_ndim_triangular,
             memory_save_mode=memory_save_mode,
-            precond_lr=0.1,  # precond lr hardcoded to 0.1
-            precond_init_scale=1.0,  # precond init scale hardcoded to 1.0
+            precond_lr=precond_lr,
+            precond_init_scale=precond_init_scale,
             mu_dtype=mu_dtype,
             precond_dtype=precond_dtype,
             trust_region_scale=trust_region_scale,
@@ -128,6 +126,7 @@ class Kron(torch.optim.Optimizer):
 
         self._tiny = torch.finfo(torch.bfloat16).tiny
         self._prob_step = 0
+        self.expr_cache = {}
 
     def precond_update_prob_schedule(self, n,
         max_prob=1.0, min_prob=0.03, decay=0.001, flat_start=250
@@ -205,7 +204,7 @@ class Kron(torch.optim.Optimizer):
                     state["Q2"] = q_state[2]
                     state["Q3"] = q_state[3]
             
-                    self.expr_cache[param._cdata] = exprs
+                    self.expr_cache[p._cdata] = exprs
 
                     # Print sizes
                     momentum_size = state["momentum_buffer"].numel()
@@ -234,11 +233,10 @@ class Kron(torch.optim.Optimizer):
                 # but this op is full of operations that fail with dtensor anyway and in-place bits so we'll do it all local anyway
                 # we're likely better off just bringing everything local than just sharding back at the end
                 # cant do max either
-                moment_buffer_local, mom_meta = to_local(momentum_buffer, keep_sharded=False)
+                momentum_buffer, mom_meta = to_local(momentum_buffer, keep_sharded=False)
                 for i in range(4):
                     if is_tensor(state[f"Q{i}"]):
                         state[f"Q{i}"] = to_local(state[f"Q{i}"], keep_sharded=False)[0]
-                state["Q"] = [to_local(q, keep_sharded=False)[0] for q in state["Q"]]
 
                 # balance preconditioners about every 100 updates
                 if grad.dim() > 1 and balance:
@@ -249,8 +247,8 @@ class Kron(torch.optim.Optimizer):
                     update_precond(
                         get_q(state),
                         self.expr_cache[p._cdata],
-                        torch.randn_like(moment_buffer_local, dtype=precond_dtype),
-                        moment_buffer_local.to(dtype=precond_dtype, non_blocking=True),
+                        torch.randn_like(momentum_buffer, dtype=precond_dtype),
+                        momentum_buffer.to(dtype=precond_dtype, non_blocking=True),
                         group["precond_lr"],
                         self._tiny,
                     )
@@ -259,7 +257,7 @@ class Kron(torch.optim.Optimizer):
                 pre_grad = _precond_grad(
                     get_q(state),
                     self.expr_cache[p._cdata],
-                    moment_buffer_local.to(dtype=precond_dtype, non_blocking=True),
+                    momentum_buffer.to(dtype=precond_dtype, non_blocking=True),
                 ).to(dtype=p.dtype, non_blocking=True)
 
                 # now we can distribute again
@@ -276,7 +274,7 @@ class Kron(torch.optim.Optimizer):
                         state[f"Q{i}"] = to_dist(state[f"Q{i}"], 
                                                  **mom_meta
                                                  )
-                state["momentum_buffer"] = to_dist(moment_buffer_local, 
+                state["momentum_buffer"] = to_dist(momentum_buffer, 
                                                    **mom_meta,
                                                    )
 
@@ -509,8 +507,6 @@ def update_precond(Q, exprs, V, G, step, tiny):
                 * torch.triu(term1 - term2)
                 @ q
             )
-    
-    return new_Q
 
     
 
