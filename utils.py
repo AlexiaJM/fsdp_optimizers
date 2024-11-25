@@ -46,4 +46,5 @@ def to_local(x, keep_sharded=False):
     return x, meta
 
 def to_dist(x, **meta):
-    return DTensor.from_local(x, **meta)
+    # return DTensor.from_local(x, **meta)
+    return distribute_tensor(x, device_mesh=meta["device_mesh"], placements=meta["placements"])

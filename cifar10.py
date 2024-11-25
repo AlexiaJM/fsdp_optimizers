@@ -16,12 +16,14 @@ from torch.distributed._composable.fsdp import fully_shard
 from tqdm import tqdm
 from soap import SOAP
 from kron import Kron
+from muon import Muon
 
 debug = False
-optimizer = "soap"
+optimizer = "muon"
 optimizers = {
     "kron": Kron,
     "soap": SOAP,
+    "muon": Muon,
 }
 optimizer_class = optimizers[optimizer]
 
