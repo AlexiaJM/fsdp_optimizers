@@ -12,23 +12,18 @@ from torch.utils._pytree import tree_map
 
 from torch.distributed.tensor import distribute_tensor, DTensor
 
-compile_mode = None
-zeroth_power_mode = 'qr'  # 'qr' is baseline, 'newtonschulz' converges better and faster, 'eigh' is perfect but slow
+def to_dist(x, from_local=False, **meta):
+    if from_local:
+        return DTensor.from_local(
+            x,
+            device_mesh=meta["device_mesh"],
+            placements=meta["placements"],
+            shape=meta["shape"],
+            stride=meta["stride"],
+        )
+    else:
+        return distribute_tensor(x, device_mesh=meta["device_mesh"], placements=meta["placements"])
 
-def local_op(fn, *args, keep_sharded=False, **kwargs):
-    device_mesh = args[0].device_mesh
-    placements = args[0].placements
-    shape = args[0].shape
-    stride = args[0].stride()
-
-    args = [to_local(x, keep_sharded)[0] for x in args]
-    kwargs = {k: to_local(v, keep_sharded)[0] for k, v in kwargs.items()}
-
-    result = fn(*args, **kwargs)
-
-    result = DTensor.from_local(result, device_mesh=device_mesh, placements=placements, shape=shape, stride=stride)
-
-    return result
 
 def to_local(x, keep_sharded=False):
     if isinstance(x, DTensor):
@@ -45,6 +40,13 @@ def to_local(x, keep_sharded=False):
 
     return x, None
 
-def to_dist(x, **meta):
-    # return DTensor.from_local(x, **meta)
-    return distribute_tensor(x, device_mesh=meta["device_mesh"], placements=meta["placements"])
+
+def local_op(x, fn, keep_sharded=False):
+    """
+    converts to Tensor, does a thing, then back to Dtensor
+    """
+    x, meta = to_local(x, keep_sharded)
+    x = fn(x)
+    if meta is not None:
+        x = to_dist(x, from_local=keep_sharded, **meta)
+    return x
