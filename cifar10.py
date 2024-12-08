@@ -1,23 +1,14 @@
-import logging
-import torch
 import torch.distributed
-import torch.nn as nn
 from einops import rearrange
 import torch
 import torchvision
 import torchvision.transforms as transforms
-import matplotlib.pyplot as plt
-import numpy as np
-import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed._composable.fsdp import fully_shard
 from tqdm import tqdm
-from soap import SOAP
-from kron import Kron
-from muon import Muon
-from kron_mars import KronMars
+from fsdp_optimizers import SOAP, Kron, Muon, KronMars
 
 debug = False
 optimizer = "kron_mars"
