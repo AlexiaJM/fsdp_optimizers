@@ -8,10 +8,7 @@ import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed._composable.fsdp import fully_shard
 from tqdm import tqdm
-from fsdp_optimizers.soap import SOAP
-from fsdp_optimizers.kron import Kron
-from fsdp_optimizers.muon import Muon
-from fsdp_optimizers.kron_mars import KronMars
+from fsdp_optimizers import SOAP, Kron, Muon, KronMars
 
 debug = False
 optimizer = "kron_mars"
