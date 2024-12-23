@@ -45,62 +45,27 @@ class Muon(torch.optim.Optimizer):
     - We believe it may not work well for finetuning pretrained models, but we haven't tested this.
 
     Arguments:
-        muon_params: The parameters to be optimized by Muon.
+        params: The parameters to be optimized.
         lr: The learning rate. The updates will have spectral norm of `lr`. (0.02 is a good default)
         momentum: The momentum used by the internal SGD. (0.95 is a good default)
         nesterov: Whether to use Nesterov-style momentum in the internal SGD. (recommended)
         ns_steps: The number of Newton-Schulz iterations to run. (6 is probably always enough)
-        adamw_params: The parameters to be optimized by AdamW. Any parameters in `muon_params` which are
-        {0, 1}-D or are detected as being the embed or lm_head will be optimized by AdamW as well.
-        adamw_lr: The learning rate for the internal AdamW.
+        muon_lr_ratio: The scaling ratio for Muon-learning-rate divided by Adamw-learning-rate
         adamw_betas: The betas for the internal AdamW.
         adamw_eps: The epsilon for the internal AdamW.
         adamw_wd: The weight decay for the internal AdamW.
     """
-    def __init__(self, muon_params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=6,
-                 adamw_params=None, adamw_lr=3e-4, adamw_betas=(0.95, 0.95), adamw_eps=1e-8, adamw_wd=0):
+    def __init__(self, params, lr=1e-5, momentum=0.95, nesterov=True, ns_steps=6,
+                 muon_lr_ratio=2, adamw_betas=(0.9, 0.999), adamw_eps=1e-6, adamw_wd=0):
 
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps,
-                        adamw_lr_ratio=adamw_lr/lr, adamw_betas=adamw_betas,
-                        adamw_eps=adamw_eps, adamw_wd=adamw_wd)
+                        muon_lr_ratio=muon_lr_ratio, adamw_betas=adamw_betas, adamw_eps=adamw_eps, adamw_wd=adamw_wd)
 
         # handle list of params or list of dicts
-        if isinstance(muon_params, Generator):
-            muon_params = list(muon_params)
-        if isinstance(adamw_params, Generator):
-            adamw_params = list(adamw_params)
-        elif adamw_params is None:
-            adamw_params = []
+        if isinstance(params, Generator):
+            params = list(params)
 
-        super().__init__([*muon_params, *adamw_params], defaults)
-
-        # Sort parameters into those for which we will use Muon, and those for which we will not
-        # we cant pickle booleans for saving, so we will use 1=True, 0=False
-        def assign_muon(p):
-            if p.ndim >= 2 and p.size(0) < 10000:
-                self.state[p]['use_muon'] = 1
-            else:
-                self.state[p]['use_muon'] = 0
-
-        if isinstance(muon_params[0], dict):
-            for group in muon_params:
-                for p in group['params']:
-                    assign_muon(p)
-        else:
-            for p in muon_params:
-                assign_muon(p)
-
-        def assign_adamw(p):
-            # Do not use Muon for parameters in adamw_params
-            self.state[p]['use_muon'] = 0
-
-        if len(adamw_params) and isinstance(adamw_params[0], dict):
-            for group in adamw_params:
-                for p in group['params']:
-                    assign_adamw(p)
-        else:
-            for p in adamw_params:
-                assign_adamw(p)
+        super().__init__(params, defaults)
 
         if torch.distributed.is_initialized():
             self.world_size = torch.distributed.get_world_size()
@@ -122,16 +87,21 @@ class Muon(torch.optim.Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            lr = group["lr"]
+            lr_muon = group['muon_lr_ratio'] * group["lr"]
+            lr_adamw = group['lr']
             momentum = group['momentum']
             for i, p in enumerate(group['params']):
-                if self.state[p]['use_muon'] == 1:
-                    g = p.grad
-                    if g is None:
-                        continue
+                g = p.grad
+                if g is None:
+                    continue
+                
+                use_muon = p.ndim >= 2 and p.size(0) < 10000 # changed condition here
+                state = self.state[p]
+
+                if use_muon:
                     if g.ndim > 2:
                         g = g.view(g.size(0), -1)
-                    state = self.state[p]
+                    
                     if 'momentum_buffer' not in state:
                         state['momentum_buffer'] = torch.zeros_like(g)
                     buf = state['momentum_buffer']
@@ -149,13 +119,10 @@ class Muon(torch.optim.Optimizer):
                     g *= max(1, g.size(0)/g.size(1))**0.5
 
                     g = g.view_as(p.data).type_as(p.data)
-                    p.data.add_(g, alpha=-lr)
+                    p.data.add_(g, alpha=-lr_muon)
                 else:
                     # these are all pointwise so we can stay in Dtensor
-                    g = p.grad
-                    if g is None:
-                        continue
-                    state = self.state[p]
+                    
                     if 'step' not in state:
                         state['step'] = 0
                         state['moment1'] = torch.zeros_like(g)
@@ -172,7 +139,7 @@ class Muon(torch.optim.Optimizer):
                     bias_correction1 = 1 - group['adamw_betas'][0]**step
                     bias_correction2 = 1 - group['adamw_betas'][1]**step
                     scale = bias_correction1 / bias_correction2**0.5
-                    p.data.mul_(1 - lr * group['adamw_wd'])
-                    p.data.add_(g, alpha=-lr/scale)
+                    p.data.mul_(1 - lr_adamw * group['adamw_wd'])
+                    p.data.add_(g, alpha=-lr_adamw/scale)
 
 
